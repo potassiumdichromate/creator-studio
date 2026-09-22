@@ -1,6 +1,6 @@
 import { getDatabase, getGameCollection } from "./databaseService.js";
 import sharp from "sharp";
-import { isSpacesConfigured, uploadPublicObject } from "./spacesStorageService.js";
+import { isR2Configured, uploadPublicObject } from "./r2StorageService.js";
 import { generateImageAsset } from "./zeroGService.js";
 import { putBufferOnZeroG } from "./zeroGStorage.js";
 import { logActivityOnChain, ACTIVITY } from "./zeroGActivityLog.js";
@@ -27,8 +27,8 @@ export async function uploadThumbnail(templateId, buffer, contentType, fileName)
   // 0G on-chain: an asset-stored event.
   logActivityOnChain(ACTIVITY.ASSET_STORED, templateId);
 
-  // Primary store is DigitalOcean Spaces — Mongo keeps only the public URL.
-  if (isSpacesConfigured()) {
+  // Primary store is Cloudflare R2 — Mongo keeps only the public URL.
+  if (isR2Configured()) {
     const url = await uploadPublicObject(`thumbnails/${encodeURIComponent(templateId)}`, buffer, contentType);
     await collection.updateOne(
       { templateId },
@@ -42,7 +42,7 @@ export async function uploadThumbnail(templateId, buffer, contentType, fileName)
     return { templateId, contentType, fileName, url };
   }
 
-  // Fallback (Spaces unconfigured): legacy binary storage.
+  // Fallback (R2 unconfigured): legacy binary storage.
   await collection.updateOne(
     { templateId },
     {
@@ -175,9 +175,9 @@ export async function generateAndStoreGameThumbnail(game) {
     usedFallback = true;
   }
 
-  // Primary store: DigitalOcean Spaces — the public URL goes onto the game
+  // Primary store: Cloudflare R2 — the public URL goes onto the game
   // record in MongoDB and the frontend renders it directly. Falls back to the
-  // Mongo-served thumbnail when Spaces is unavailable.
+  // Mongo-served thumbnail when R2 is unavailable.
   const zeroGStorage = await putBufferOnZeroG({
     objectType: "thumbnail",
     objectId: game.id,
@@ -193,7 +193,7 @@ export async function generateAndStoreGameThumbnail(game) {
     }
   });
   let thumbnailUrl;
-  if (isSpacesConfigured()) {
+  if (isR2Configured()) {
     try {
       const uploadedUrl = await uploadPublicObject(
         `thumbnails/${encodeURIComponent(game.id)}`,
@@ -202,7 +202,7 @@ export async function generateAndStoreGameThumbnail(game) {
       );
       thumbnailUrl = `${uploadedUrl}?v=${Date.now()}`;
     } catch (error) {
-      console.warn("Spaces upload failed; falling back to Mongo thumbnail", { message: error.message });
+      console.warn("R2 upload failed; falling back to Mongo thumbnail", { message: error.message });
     }
   }
   if (!thumbnailUrl) {

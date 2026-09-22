@@ -1,26 +1,26 @@
 import sharp from "sharp";
 import { generateImageAsset, getModelsForTier } from "./zeroGService.js";
 import { removeBackground, bufferFromImage } from "./spriteAssetService.js";
-import { isSpacesConfigured, uploadPublicObject } from "./spacesStorageService.js";
+import { isR2Configured, uploadPublicObject } from "./r2StorageService.js";
 import { uploadThumbnail } from "./thumbnailService.js";
 import { putBufferOnZeroG } from "./zeroGStorage.js";
 
 // In-game artwork (NOT cover art). Produces a { role -> url } manifest that the
 // generated game's runtime (KULT_RUNTIME.drawAsset) loads and draws. Character
 // and object sprites are cut out to transparent PNGs; the environment keeps its
-// full background. Spaces/CDN is the fast "ready" path; 0G provenance is
+// full background. R2/CDN is the fast "ready" path; 0G provenance is
 // fire-and-forget in the background.
 
 function safeId(gameId, role) {
   return `${String(gameId).replace(/[^a-zA-Z0-9_-]/g, "-")}--asset-${role}`;
 }
 
-// Store the finished sprite: Spaces/CDN when configured (fast, cacheable),
+// Store the finished sprite: R2/CDN when configured (fast, cacheable),
 // otherwise the Mongo-served thumbnail endpoint as a fallback.
 async function storeSprite({ gameId, role, buffer }) {
   const key = `sprites/${gameId}/${role}.png`;
   let url;
-  if (isSpacesConfigured()) {
+  if (isR2Configured()) {
     url = await uploadPublicObject(key, buffer, "image/png");
   } else {
     const id = safeId(gameId, role);

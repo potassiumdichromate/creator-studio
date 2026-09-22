@@ -1,13 +1,13 @@
 import sharp from "sharp";
 import { generateImageAsset, getModelsForTier } from "./zeroGService.js";
-import { uploadPublicObject } from "./spacesStorageService.js";
+import { uploadPublicObject } from "./r2StorageService.js";
 import { putBufferOnZeroG } from "./zeroGStorage.js";
 import { getGameCollection } from "./databaseService.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Sprite asset pipeline
 //  Generates real image sprites (character + key objects) for a game, cuts out
-//  their background to transparent PNGs, uploads them to Spaces/CDN (the fast
+//  their background to transparent PNGs, uploads them to R2/CDN (the fast
 //  "ready" path) and pushes a provenance copy to 0G in the background. The
 //  resulting { name -> url } manifest is stored on the game as `assets.sprites`
 //  and can be fed into code generation so games render real sprites instead of
