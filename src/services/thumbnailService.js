@@ -1,6 +1,6 @@
 import { getDatabase, getGameCollection } from "./databaseService.js";
 import sharp from "sharp";
-import { isR2Configured, uploadPublicObject } from "./r2StorageService.js";
+import { isObjectStorageConfigured, uploadPublicObject } from "./objectStorageService.js";
 import { generateImageAsset } from "./zeroGService.js";
 import { putBufferOnZeroG } from "./zeroGStorage.js";
 import { logActivityOnChain, ACTIVITY } from "./zeroGActivityLog.js";
@@ -27,9 +27,19 @@ export async function uploadThumbnail(templateId, buffer, contentType, fileName)
   // 0G on-chain: an asset-stored event.
   logActivityOnChain(ACTIVITY.ASSET_STORED, templateId);
 
-  // Primary store is Cloudflare R2 — Mongo keeps only the public URL.
-  if (isR2Configured()) {
-    const url = await uploadPublicObject(`thumbnails/${encodeURIComponent(templateId)}`, buffer, contentType);
+  // Primary store is the object store (Cloudflare R2) — Mongo keeps only the
+  // public URL. If that upload fails, fall through to Mongo binary storage
+  // instead of losing the thumbnail.
+  const storeUrl = async () => (isObjectStorageConfigured()
+    ? uploadPublicObject(`thumbnails/${encodeURIComponent(templateId)}`, buffer, contentType)
+    : null);
+  let url = null;
+  try {
+    url = await storeUrl();
+  } catch (error) {
+    console.warn("Thumbnail store failed; keeping it in Mongo instead", { templateId, message: error.message });
+  }
+  if (url) {
     await collection.updateOne(
       { templateId },
       {
@@ -42,7 +52,7 @@ export async function uploadThumbnail(templateId, buffer, contentType, fileName)
     return { templateId, contentType, fileName, url };
   }
 
-  // Fallback (R2 unconfigured): legacy binary storage.
+  // Fallback (no store configured, or it failed): legacy binary storage.
   await collection.updateOne(
     { templateId },
     {
@@ -193,7 +203,7 @@ export async function generateAndStoreGameThumbnail(game) {
     }
   });
   let thumbnailUrl;
-  if (isR2Configured()) {
+  if (isObjectStorageConfigured()) {
     try {
       const uploadedUrl = await uploadPublicObject(
         `thumbnails/${encodeURIComponent(game.id)}`,
@@ -202,7 +212,7 @@ export async function generateAndStoreGameThumbnail(game) {
       );
       thumbnailUrl = `${uploadedUrl}?v=${Date.now()}`;
     } catch (error) {
-      console.warn("R2 upload failed; falling back to Mongo thumbnail", { message: error.message });
+      console.warn("Object storage upload failed; falling back to Mongo thumbnail", { message: error.message });
     }
   }
   if (!thumbnailUrl) {

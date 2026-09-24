@@ -45,24 +45,44 @@ function attachValidatedRuntimeShell(code) {
   return source.includes("KULT_VALIDATED_RUNTIME_V1") ? source : `${VALIDATED_RUNTIME_SHELL}\n\n${source}`;
 }
 
-function buildPromptBundle({ gamePackage, request, plan, premium = false }) {
+// TIER{n}_GAME_SOUND=true lets generated games add light procedural sound.
+function gameSoundEnabled(tier) {
+  const value = process.env[`TIER${Number(tier)}_GAME_SOUND`];
+  return /^(1|true|yes|on)$/i.test(String(value ?? "").trim());
+}
+
+const SOUND_RULES = [
+  "SOUND — add light procedural sound effects with the Web Audio API (no audio files):",
+  "- Create the AudioContext (window.AudioContext || window.webkitAudioContext) only inside the first tap/click/keydown handler — browsers block audio before a user gesture — and call resume() there. If neither constructor exists, simply play without sound.",
+  "- Synthesize short effects for the key moments this game has (jump or hop, collect or coin, hit or crash, level up, game over) from oscillators and short noise bursts with quick gain envelopes; optionally one quiet ambient or engine loop that follows the action.",
+  "- Keep it subtle: route everything through one master gain around 0.25, don't let effects pile up into noise, and stop loops on pause and game over.",
+  "- Add a small tap-accessible mute toggle in the HUD, remembered in localStorage.",
+  "- Sound must never block, delay or break gameplay."
+];
+
+function buildPromptBundle({ gamePackage, request, plan, premium = false, sound = false }) {
   const hasAssets = Boolean(
     gamePackage.gameplayAssets?.manifest && Object.keys(gamePackage.gameplayAssets.manifest).length
   );
+  // Code-drawn sprite sets (Tier 3) come with a catalog: name, role, pixel size
+  // and animation frames. Without one, the classic player/environment/objects
+  // wording below is used unchanged.
+  const catalog = Array.isArray(gamePackage.gameplayAssets?.catalog) ? gamePackage.gameplayAssets.catalog : null;
+  const assetNames = catalog ? catalog.map((entry) => entry.name).join("/") : "player/environment/objects";
   const premiumRules = premium
     ? [
         "ULTRA PREMIUM QUALITY IS MANDATORY:",
         hasAssets
-          ? "- Real sprite images are supplied (player/environment/objects). Render them with KULT_RUNTIME.drawAsset and build polished procedural effects AROUND them (particles, impact flashes, HUD, transitions) — do NOT replace the supplied art with drawn shapes."
+          ? `- Real sprite images are supplied (${assetNames}). Render them with KULT_RUNTIME.drawAsset and build polished procedural effects AROUND them (particles, impact flashes, HUD, transitions) — do NOT replace the supplied art with drawn shapes.`
           : "- Build polished procedural visuals directly in Canvas/CSS/SVG; do not request or depend on separately generated assets.",
         "- Include purposeful motion: entrance transitions, responsive gameplay animation, impact flashes, particle bursts, and restrained screen shake on major impacts.",
         "- Include a polished start menu, touch-accessible pause/resume, game-over or victory menu, and an obvious tap/click restart flow.",
         "- Include meaningful progression such as increasing difficulty, levels/waves, unlocks, combo milestones, or escalating challenge appropriate to the game.",
         "- Use one intentional art direction: a small named color palette, consistent shapes, typography, lighting, HUD, and effects.",
         "- Prioritize game feel: immediate input response, readable collision feedback, satisfying scoring feedback, and smooth transitions.",
-        "- Do not add generated audio or Web Audio. Premium quality must come from gameplay and visuals.",
+        sound ? null : "- Do not add generated audio or Web Audio. Premium quality must come from gameplay and visuals.",
         "- Treat every item above as required functionality, not optional decoration."
-      ]
+      ].filter(Boolean)
     : [];
   return {
     premium,
@@ -91,6 +111,7 @@ function buildPromptBundle({ gamePackage, request, plan, premium = false }) {
       "- Score & combo feedback: float a rising \"+points\" text at the event location, and escalate the visual intensity (bigger flash, more particles) on streaks, combos, and level-ups.",
       "- Transitions: ease the start menu, level changes, and the game-over screen in and out (fade/scale), not hard cuts.",
       "- Keep it performant and safe: cap/pool particles, hold 60fps, scale everything to the current canvas size, and never let effects block input, throw, or break the core loop.",
+      ...(sound ? SOUND_RULES : []),
       ...premiumRules,
       "FINAL SELF-CHECK — before you output, silently re-read your module and fix ONLY genuine defects you find against this list:",
       "- Every control is wired and actually works on BOTH keyboard and touch (no dead inputs, no half-implemented handlers).",
@@ -113,7 +134,27 @@ function buildPromptBundle({ gamePackage, request, plan, premium = false }) {
         ? [
             "Render the supplied sprites with KULT_RUNTIME.drawAsset(name, x, y, w, h) — it already preloads the images the correct way. Prefer this over creating your own Image objects.",
             "If you DO load an image yourself, use `const img = new Image(); img.src = url;` and DO NOT set img.crossOrigin — these images are for on-canvas display only, and setting crossOrigin makes them fail to load (you get a blank/box instead of the art).",
-            "Use the player asset for the main character, environment as the gameplay background, and objects for visible world props/obstacles/collectibles.",
+            ...(catalog
+              ? [
+                  "Sprite catalog (every entry is a transparent PNG already loaded under its name; width/height are its pixel size):",
+                  ...catalog.map((entry) => `- ${entry.name} [${entry.kind}] ${entry.width}x${entry.height} (aspect ${entry.aspect})${entry.facing && entry.facing !== "none" ? `, front faces ${entry.facing}` : ""}: ${entry.description}${entry.usage ? ` — use: ${entry.usage}` : ""}${entry.basedOn ? ` — animation frame of ${entry.basedOn}` : ""}${Array.isArray(entry.rig) && entry.rig.length ? " — rigged (see below)" : ""}`),
+                  "Use every catalog sprite for its listed role. \"player\" is the character the user controls. If \"environment\" exists, draw it first each frame covering the whole canvas.",
+                  "Always keep each sprite's aspect ratio: pick a draw height from the canvas size and use width = height * aspect. Size sprites from the canvas so they read well on a phone.",
+                  "Each sprite's front already points in its listed direction, so draw it as-is when it travels that way. A sprite facing right that moves left is flipped with ctx.save(); ctx.translate(x + w, y); ctx.scale(-1, 1); draw at (0, 0); ctx.restore(). Only rotate a sprite when it really travels in a different direction, and never draw a vehicle sideways by accident.",
+                  ...catalog
+                    .filter((entry) => !entry.basedOn && catalog.some((other) => other.basedOn === entry.name))
+                    .map((entry) => `Frame animation: ${[entry.name, ...catalog.filter((other) => other.basedOn === entry.name).map((other) => other.name)].join(" → ")} is one looping cycle — step through it in that order about every 90–130ms while ${entry.name} moves, and hold ${entry.name} when idle. Draw every frame with the same box so it does not jitter.`),
+                  ...catalog
+                    .filter((entry) => Array.isArray(entry.rig) && entry.rig.length)
+                    .map((entry) => `Rigged sprite ${entry.name}: instead of the single image, draw these layers back-to-front at exactly the same x, y, w, h you would use for ${entry.name}: ${entry.rig.map((layer) => `${layer.layer} (${layer.motion}${layer.pivot ? `, pivot ${layer.pivot[0]},${layer.pivot[1]}` : ""})`).join(", ")}.`),
+                  ...(catalog.some((entry) => Array.isArray(entry.rig) && entry.rig.length)
+                    ? ["Animating rig layers: a pivot is a fraction of the sprite box (0,0 top-left, 1,1 bottom-right). Rotate a layer around it with ctx.save(); ctx.translate(x + px*w, y + py*h); ctx.rotate(angle); ctx.translate(-(x + px*w), -(y + py*h)); drawAsset(layer, x, y, w, h); ctx.restore(). Motions: spin = angle grows with travel speed; flap = Math.sin(t*14)*0.45; swing = Math.sin(t*10)*0.5, with paired limbs (_front/_back, _left/_right) in opposite phase; bob = Math.sin(t*6)*0.15; blink = every 3–4s squash the layer vertically to 10% around its pivot for about 120ms; pulse = scale the layer around its pivot by 1 + Math.sin(t*25)*0.12 plus a little randomness (flames, jets, glows; bigger during boosts); none = no transform. When flipping a sprite to face left, flip the whole sprite first, then apply the layer rotations inside the flip. If any layer is not loaded yet, draw the single image instead."]
+                    : []),
+                  "Add procedural life on top: idle bob, squash-and-stretch on jump and landing, tilt toward the direction of motion, a white hit flash, and a scale pop on spawn.",
+                  "Sprites have no baked ground shadow: draw a soft dark ellipse under characters and grounded objects in code, kept on the ground (it shrinks and fades as they jump).",
+                  "Use the sprite's drawn box for collisions, shrunk slightly (about 80%) so hits feel fair."
+                ]
+              : ["Use the player asset for the main character, environment as the gameplay background, and objects for visible world props/obstacles/collectibles."]),
             "Do not replace supplied assets with circles, rectangles, emoji, Unicode characters, or other placeholder primitives.",
             "Draw a plain fallback only for the brief moment while an image is still loading — never as the permanent look."
           ]
@@ -322,18 +363,35 @@ function missingRequiredFeatures(code, premium) {
 const SCRATCH_CHAR_TARGET = 18000;
 const SCRATCH_MAX_TOKENS = 7168;
 
+// Per-tier overrides from .env (TIER{n}_CODING_MAX_TOKENS / TIER{n}_CODING_CHAR_TARGET).
+// Premium games with sprite rigs and sound run well past 18K chars; a cap that
+// cuts them off forces a continuation plus repair passes that cost more than
+// simply letting one reply finish.
+function codingLimits(models) {
+  const n = models?.tier;
+  const read = (key, fallback, min, max) => {
+    const value = Number(process.env[`TIER${n}_${key}`]);
+    return Number.isFinite(value) && value > 0 ? Math.min(max, Math.max(min, Math.round(value))) : fallback;
+  };
+  return {
+    maxTokens: read("CODING_MAX_TOKENS", SCRATCH_MAX_TOKENS, 2000, 32000),
+    charTarget: read("CODING_CHAR_TARGET", SCRATCH_CHAR_TARGET, 8000, 80000)
+  };
+}
+
 async function generateWithModel(promptBundle, model, onProgress, models = zeroGModels) {
   // Single-stage unified code generation for maximum speed
+  const limits = codingLimits(models);
   const response = await callCodingStage({
     model,
-    maxTokens: SCRATCH_MAX_TOKENS,
+    maxTokens: limits.maxTokens,
     onChunk: (chars) => onProgress?.({ stage: "writing-code", chars }),
     system: [
       promptBundle.system,
       "You are implementing a COMPLETE, fully playable browser game from scratch in one JavaScript module.",
       "Keep your thinking/reasoning brief to save output tokens.",
       // Soft length nudge only — correctness always wins over brevity.
-      `Aim to keep the module around ${SCRATCH_CHAR_TARGET.toLocaleString("en-US")} characters, but NEVER omit, stub, shorten, or fake gameplay to hit a length — a complete working game is the only priority. No TODOs, no placeholder functions, no "// add logic here".`,
+      `Aim to keep the module around ${limits.charTarget.toLocaleString("en-US")} characters, but NEVER omit, stub, shorten, or fake gameplay to hit a length — a complete working game is the only priority. No TODOs, no placeholder functions, no "// add logic here".`,
       "EVERY feature, control, button, and mechanic you mention or draw MUST be fully implemented and actually work — no dead buttons, no half-wired inputs.",
       "RESTART must fully reset ALL game state to a fresh start (score, player, entities, timers, flags, game-over state) and must trigger ONLY on an explicit tap/click/keypress after game over — the game must NEVER auto-restart, loop, or reset itself on its own.",
       "The game MUST NOT throw any uncaught runtime error while loading or playing — guard array/object access, initialize every variable before use, and never read a property of something that could be undefined.",
@@ -361,7 +419,7 @@ async function generateWithModel(promptBundle, model, onProgress, models = zeroG
     try {
       const repair = await callCodingStage({
         model: models.repair || models.coding,
-        maxTokens: SCRATCH_MAX_TOKENS,
+        maxTokens: codingLimits(models).maxTokens,
         timeoutMs: promptBundle.premium ? 120000 : 720000,
         retries: promptBundle.premium ? 0 : 1,
         onChunk: (chars) => onProgress?.({ stage: "repairing", chars }),
@@ -674,6 +732,34 @@ async function ensureRuntimeRuns(generated, promptBundle, gamePackage, reference
   return generated;
 }
 
+// Playtest fix pass: the playtest saw real problems in the running game (from
+// screenshots and the error console). Fix only those, keep everything else, and
+// accept the result only if it still passes the same syntax + runtime checks —
+// otherwise the original module is kept.
+export async function repairFromPlaytest({ code, issues, gamePackage, model, maxTokens = 16384 }) {
+  const response = await callCodingStage({
+    model,
+    maxTokens,
+    retries: 1,
+    timeoutMs: 600000,
+    system: [
+      "You are fixing a finished browser game module after a playtest on a 390x844 phone screen.",
+      "Fix ONLY the problems listed. Keep every working mechanic, feature, sprite, effect, sound and HUD element exactly as it is — do not rewrite, simplify or restyle anything else.",
+      "Return the complete corrected JavaScript module only, with no markdown fences and no commentary."
+    ].join("\n"),
+    user: [
+      "Problems found in the playtest:",
+      ...issues.map((issue) => `- ${issue}`),
+      "",
+      "Current module:",
+      code
+    ].join("\n")
+  });
+  const fixed = attachValidatedRuntimeShell(stripMarkdownFence(response.content));
+  const problem = moduleProblem(fixed, gamePackage);
+  return { code: problem ? code : fixed, ok: !problem, problem, usage: response.usage ?? null, model: response.model };
+}
+
 export async function createRefinementBundle(
   { gamePackage, request, refinementLevel, strategy, baseCode, plan, tier, models = zeroGModels },
   { onProgress } = {}
@@ -690,7 +776,8 @@ export async function createRefinementBundle(
     gamePackage,
     request,
     plan: strategy === "pure-agent" && !baseCode ? plan : null,
-    premium: Number(tier) === 3 && !baseCode
+    premium: Number(tier) === 3 && !baseCode,
+    sound: gameSoundEnabled(tier) && !baseCode
   });
   // When the caller supplies the game's current code (post-creation editing),
   // that code IS the seed — the agent applies the requested change to it.

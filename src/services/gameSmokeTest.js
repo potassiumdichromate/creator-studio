@@ -11,6 +11,29 @@ import vm from "node:vm";
 
 const noop = () => {};
 
+// Callable/constructible stub for Web Audio objects used by the smoke test.
+function audioStub() {
+  return new Proxy(function () {}, {
+    get(_target, key) {
+      if (key === Symbol.toPrimitive) return () => 0;
+      if (key === "then") return undefined;
+      if (key === "state") return "running";
+      if (key === "sampleRate") return 44100;
+      if (key === "currentTime" || key === "value" || key === "length" || key === "duration") return 0;
+      return audioStub();
+    },
+    set() {
+      return true;
+    },
+    apply() {
+      return audioStub();
+    },
+    construct() {
+      return audioStub();
+    }
+  });
+}
+
 // Strips the imports/exports the sandbox also strips, so the smoke test runs
 // the exact shape the browser executes.
 function stripForRun(code) {
@@ -151,6 +174,14 @@ export function runtimeSmokeTest(code, gamePackage) {
     },
     Audio: function () {
       return el;
+    },
+    // Web Audio stand-in: any node, param or method call returns another stub,
+    // numbers read as 0, so procedural sound code can't crash the smoke test.
+    AudioContext: function () {
+      return audioStub();
+    },
+    webkitAudioContext: function () {
+      return audioStub();
     },
     devicePixelRatio: 1,
     innerWidth: 960,

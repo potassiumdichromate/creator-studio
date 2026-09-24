@@ -125,9 +125,28 @@ async function doUploadToZeroG(buffer) {
 // background/fire-and-forget, so the added latency is acceptable.
 let uploadChain = Promise.resolve();
 
+// Uploads run one at a time, so a single upload that never finalizes (e.g. a
+// storage node that never receives its last segment) would block every later
+// upload forever. Cap each one; putBufferOnZeroG records a timeout as "failed"
+// and the queue moves on. ZERO_G_STORAGE_UPLOAD_TIMEOUT_MS overrides the cap.
+function uploadTimeoutMs() {
+  const value = Number(process.env.ZERO_G_STORAGE_UPLOAD_TIMEOUT_MS);
+  return Number.isFinite(value) && value > 0 ? value : 180_000;
+}
+
+function withUploadTimeout(promise) {
+  const ms = uploadTimeoutMs();
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`0G storage upload did not finalize within ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 async function uploadToZeroG({ buffer }) {
   if (!isZeroGStorageConfigured()) return null;
-  const run = uploadChain.then(() => doUploadToZeroG(buffer), () => doUploadToZeroG(buffer));
+  const upload = () => withUploadTimeout(doUploadToZeroG(buffer));
+  const run = uploadChain.then(upload, upload);
   // Keep the chain alive regardless of this upload's outcome.
   uploadChain = run.then(() => undefined, () => undefined);
   return run;

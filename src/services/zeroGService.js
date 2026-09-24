@@ -276,12 +276,31 @@ function isAnthropicModel(model) {
 // Converts the OpenAI-style {messages,temperature,maxTokens} into an Anthropic
 // Messages body. The 0G router's Anthropic passthrough rejects a top-level
 // `system` field (it 500s), so the system prompt is folded into the first user
-// turn instead of sent separately. Content is text-only here — Claude models are
-// used only for the text coding/orchestrator roles, never vision.
+// turn instead of sent separately. Text-only messages are flattened to a string;
+// a user message that carries OpenAI-style image_url parts is converted to
+// Anthropic content blocks so Claude can see the image (used by the code-drawn
+// asset review, which shows the model a render of its own SVG).
+function toAnthropicPart(part) {
+  if (typeof part === "string") return { type: "text", text: part };
+  if (part?.type === "image_url") {
+    const url = String(part.image_url?.url ?? part.image_url ?? "");
+    const match = url.match(/^data:([^;]+);base64,(.+)$/s);
+    return match
+      ? { type: "image", source: { type: "base64", media_type: match[1], data: match[2] } }
+      : { type: "image", source: { type: "url", url } };
+  }
+  return { type: "text", text: part?.text ?? "" };
+}
+
 function toAnthropicBody({ model, messages, maxTokens }) {
   const systemParts = [];
   const convo = [];
   for (const m of messages) {
+    const hasImage = Array.isArray(m.content) && m.content.some((p) => p?.type === "image_url");
+    if (hasImage && m.role !== "system") {
+      convo.push({ role: m.role === "assistant" ? "assistant" : "user", content: m.content.map(toAnthropicPart) });
+      continue;
+    }
     const text = typeof m.content === "string"
       ? m.content
       : Array.isArray(m.content)
@@ -294,8 +313,9 @@ function toAnthropicBody({ model, messages, maxTokens }) {
   const systemText = systemParts.join("\n\n");
   if (systemText) {
     const firstUser = convo.find((m) => m.role === "user");
-    if (firstUser) firstUser.content = `${systemText}\n\n${firstUser.content}`;
-    else convo.unshift({ role: "user", content: systemText });
+    if (!firstUser) convo.unshift({ role: "user", content: systemText });
+    else if (Array.isArray(firstUser.content)) firstUser.content.unshift({ type: "text", text: systemText });
+    else firstUser.content = `${systemText}\n\n${firstUser.content}`;
   }
 
   // No `temperature`: Claude thinking models (Fable/Opus on this router) reject
@@ -401,9 +421,26 @@ export async function callZeroGChat({
 }) {
   const { apiKey, baseUrl } = getClientConfig();
 
-  for (let attempt = 0; attempt <= retries; attempt += 1) {
+  // Optional global override: when ZERO_G_CHAT_TIMEOUT_MS is set (> 0), it wins
+  // over every per-call timeoutMs. Lets a long premium run disable step timeouts
+  // without touching each call site. Unset → per-call defaults are used as-is.
+  const overrideTimeout = Number(process.env.ZERO_G_CHAT_TIMEOUT_MS);
+  const effectiveTimeoutMs = Number.isFinite(overrideTimeout) && overrideTimeout > 0
+    ? overrideTimeout
+    : timeoutMs;
+
+  // Optional global retry floor: when ZERO_G_CHAT_MIN_RETRIES is set, guarantees
+  // at least that many retries on top of any per-call value. Transient 502
+  // "no message content" empties are retriable, so this keeps a step that runs
+  // with retries:0 (specs/routing) from dying on a single hiccup.
+  const minRetries = Number(process.env.ZERO_G_CHAT_MIN_RETRIES);
+  const effectiveRetries = Number.isFinite(minRetries) && minRetries > retries
+    ? minRetries
+    : retries;
+
+  for (let attempt = 0; attempt <= effectiveRetries; attempt += 1) {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    const timeout = setTimeout(() => controller.abort(), effectiveTimeoutMs);
 
     try {
       // Stream the completion: Node's fetch aborts any request whose response
@@ -465,13 +502,13 @@ export async function callZeroGChat({
       console.error("0G chat request failed", {
         model,
         attempt: attempt + 1,
-        maxAttempts: retries + 1,
+        maxAttempts: effectiveRetries + 1,
         status: error.status ?? null,
         message: error.message,
         cause: errorCauseDetails(error)
       });
 
-      if (attempt >= retries || !isRetriableError(error)) throw error;
+      if (attempt >= effectiveRetries || !isRetriableError(error)) throw error;
       await sleep(retryBaseDelayMs * (2 ** attempt));
     } finally {
       clearTimeout(timeout);

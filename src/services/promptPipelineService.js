@@ -4,6 +4,7 @@ import { createRefinementBundle } from "./refinementService.js";
 import { createGenerationLogger } from "../utils/generationLogger.js";
 import { createOrchestrationPlan, generateImageAsset, runBackgroundTask, getModelsForTier, getTierStrategy, normalizeTier, zeroGModels } from "./zeroGService.js";
 import { generateGameplayAssets } from "./gameplayAssetService.js";
+import { getPlaytestConfig, runPlaytest } from "./playtestService.js";
 import { nanoid } from "nanoid";
 
 const defaultOptions = {
@@ -544,9 +545,14 @@ export async function generateGameFromPrompt({
       const gameplayAssets = await generateGameplayAssets(game, { tier: resolvedTier });
       if (gameplayAssets.status === "ready") {
         game.gameplayAssets = gameplayAssets;
+        warnings.push(...(gameplayAssets.warnings ?? []));
         logger.log("pipeline.gameplay-assets.done", {
           count: Object.keys(gameplayAssets.manifest).length,
+          source: gameplayAssets.source ?? "image",
           model: gameplayAssets.model,
+          models: gameplayAssets.models ?? null,
+          timings: gameplayAssets.timings ?? null,
+          usage: gameplayAssets.usage ?? null,
         });
       } else {
         warnings.push("Gameplay assets unavailable; building with procedural visuals.");
@@ -565,6 +571,7 @@ export async function generateGameFromPrompt({
         refinementLevel: selection.customization,
         strategy,
         plan: pureAgentPlan?.content ?? null,
+        tier: resolvedTier,
         models
       })
     : null;
@@ -616,6 +623,28 @@ export async function generateGameFromPrompt({
       refinement = codeResult.value;
       game.refinement = refinement;
       game.generation.codeModel = refinement.model;
+
+      // Playtest (per tier, from .env): run the finished game in a headless
+      // browser, have a vision model check the screenshots, and give real
+      // problems one fix pass. Never blocks the build if it can't run.
+      const playtestConfig = getPlaytestConfig(resolvedTier);
+      if (playtestConfig.enabled && refinement.generatedCode) {
+        logger.log("pipeline.playtest.start", { model: playtestConfig.model, browser: Boolean(playtestConfig.browserPath) });
+        try {
+          const { code, ...playtest } = await runPlaytest({ code: refinement.generatedCode, gamePackage: game, config: playtestConfig, models });
+          refinement.generatedCode = code;
+          game.generation.playtest = playtest;
+          logger.log("pipeline.playtest.done", {
+            status: playtest.status,
+            issues: playtest.issues ?? [],
+            fixModel: playtest.fixModel ?? null,
+            ms: playtest.ms ?? null
+          });
+        } catch (error) {
+          warnings.push(`Playtest skipped: ${error.message}`);
+          logger.log("pipeline.playtest.done", { status: "error", message: error.message });
+        }
+      }
     } else {
       warnings.push(`Code agent skipped: ${codeResult.reason.message}`);
     }

@@ -15,11 +15,12 @@ function expectedChainId() {
   return Number.isFinite(value) && value > 0 ? BigInt(value) : 16661n;
 }
 
-function getZeroGPaymentConfig() {
+export function getZeroGPaymentConfig() {
   return {
     chainId: Number(expectedChainId()),
     rpcUrl: paymentRpcUrl(),
     treasuryWallet: process.env.ZERO_G_TREASURY_WALLET || "",
+    contractAddress: process.env.ZERO_G_PAYMENT_CONTRACT_ADDRESS || process.env.CONTRACT_ADDRESS || "",
     confirmations: Number(process.env.ZERO_G_PAYMENT_CONFIRMATIONS || 1)
   };
 }
