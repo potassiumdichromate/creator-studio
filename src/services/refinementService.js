@@ -36,7 +36,12 @@ const KULT_RUNTIME = (() => {
   };
   const reportScore = (score) => window.reportScore?.(Number(score) || 0);
   const consumeRestart = () => { const value = input.restartRequested; input.restartRequested = false; return value; };
-  return { canvas, ctx, input, assets, resize, drawAsset, reportScore, consumeRestart };
+  const api = { canvas, ctx, input, assets, resize, drawAsset, reportScore, consumeRestart };
+  // Also expose it globally: generated code sometimes reaches for
+  // window.KULT_RUNTIME, and without this that lookup returns undefined and
+  // every drawAsset call silently becomes a no-op (sprites never render).
+  window.KULT_RUNTIME = api;
+  return api;
 })();
 `.trim();
 
@@ -278,6 +283,7 @@ async function callCodingStage({
   maxTokens = 3500,
   timeoutMs = 720000,
   retries = 1,
+  thinking,
   onChunk
 }) {
   const messages = [
@@ -290,6 +296,7 @@ async function callCodingStage({
     maxTokens,
     timeoutMs,
     retries,
+    thinking,
     messages,
     onChunk
   });
@@ -304,6 +311,7 @@ async function callCodingStage({
     maxTokens,
     timeoutMs,
     retries,
+    thinking,
     onChunk,
     messages: [
       ...messages,
@@ -375,8 +383,22 @@ function codingLimits(models) {
   };
   return {
     maxTokens: read("CODING_MAX_TOKENS", SCRATCH_MAX_TOKENS, 2000, 32000),
-    charTarget: read("CODING_CHAR_TARGET", SCRATCH_CHAR_TARGET, 8000, 80000)
+    charTarget: read("CODING_CHAR_TARGET", SCRATCH_CHAR_TARGET, 8000, 80000),
+    thinking: codingThinking(n)
   };
+}
+
+// TIER{n}_CODING_THINKING: "off" disables the model's hidden thinking for code
+// generation, a number gives it that many tokens to think with, and anything
+// else leaves the provider default. Thinking is billed as output and shares the
+// max_tokens budget, so on long games it can consume the whole budget before the
+// code is finished.
+function codingThinking(tier) {
+  const raw = String(process.env[`TIER${tier}_CODING_THINKING`] ?? "").trim().toLowerCase();
+  if (!raw) return undefined;
+  if (["off", "false", "0", "disabled", "none"].includes(raw)) return { type: "disabled" };
+  const budget = Number(raw);
+  return Number.isFinite(budget) && budget > 0 ? { type: "enabled", budget_tokens: Math.round(budget) } : undefined;
 }
 
 async function generateWithModel(promptBundle, model, onProgress, models = zeroGModels) {
@@ -385,6 +407,7 @@ async function generateWithModel(promptBundle, model, onProgress, models = zeroG
   const response = await callCodingStage({
     model,
     maxTokens: limits.maxTokens,
+    thinking: limits.thinking,
     onChunk: (chars) => onProgress?.({ stage: "writing-code", chars }),
     system: [
       promptBundle.system,

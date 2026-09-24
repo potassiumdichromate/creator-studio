@@ -292,7 +292,7 @@ function toAnthropicPart(part) {
   return { type: "text", text: part?.text ?? "" };
 }
 
-function toAnthropicBody({ model, messages, maxTokens }) {
+function toAnthropicBody({ model, messages, maxTokens, thinking }) {
   const systemParts = [];
   const convo = [];
   for (const m of messages) {
@@ -324,6 +324,10 @@ function toAnthropicBody({ model, messages, maxTokens }) {
     model,
     max_tokens: maxTokens,
     stream: true,
+    // Claude models on this router think before answering, and that thinking is
+    // billed as output and spends the same max_tokens budget — long code runs
+    // hit the cap mid-file. Callers can disable it or give it a small budget.
+    ...(thinking ? { thinking } : {}),
     messages: convo
   };
 }
@@ -417,6 +421,7 @@ export async function callZeroGChat({
   timeoutMs = 120000,
   retries = 2,
   retryBaseDelayMs = 1000,
+  thinking,
   onChunk
 }) {
   const { apiKey, baseUrl } = getClientConfig();
@@ -462,7 +467,7 @@ export async function callZeroGChat({
         },
         body: JSON.stringify(
           anthropic
-            ? toAnthropicBody({ model, messages, maxTokens })
+            ? toAnthropicBody({ model, messages, maxTokens, thinking })
             : { model, messages, temperature, max_tokens: maxTokens, stream: true }
         )
       });
