@@ -13,6 +13,13 @@ import { recordPaymentReceipt, recordGameVersion, recordReferenceInput, recordVo
 import { logActivityOnChain, ACTIVITY } from "../services/zeroGActivityLog.js";
 import { authIdentityAliases, authOwnsIdentity } from "../services/identityAliasService.js";
 import {
+  computeCanEdit,
+  computeLayerEnabledFor,
+  getComputeLayerConfig,
+  runComputeBuild,
+  runComputeEdit
+} from "../services/computeLayerService.js";
+import {
   analyzeReferenceImage,
   createOrchestrationPlan,
   generateImageAsset,
@@ -153,8 +160,32 @@ function ensureEnhancementLength(enhancedPrompt) {
   return result;
 }
 
+// Starts the cover-art job for a game that has neither a cover nor a running
+// cover job, and records the job id on the game.
+async function startThumbnailIfMissing(gamePackage, storedGame, thumbnailGame) {
+  if (gamePackage.thumbnailJobId || storedGame?.thumbnailUrl) return;
+  const thumbnailJob = startJob("thumbnail-generation", () =>
+    generateAndStoreGameThumbnail(thumbnailGame)
+  );
+  gamePackage.thumbnailJobId = thumbnailJob.id;
+  await updateGamePackageFields(gamePackage.id, { thumbnailJobId: thumbnailJob.id });
+}
+
+// { "generation.x": 1, style: {...} } → { generation: { x: 1 }, style: {...} }
+// for whole-document saves (targeted updates take the dotted form directly).
+function nestDottedFields(fields) {
+  const out = {};
+  for (const [key, value] of Object.entries(fields)) {
+    const parts = key.split(".");
+    let target = out;
+    for (const part of parts.slice(0, -1)) target = target[part] ??= {};
+    target[parts.at(-1)] = value;
+  }
+  return out;
+}
+
 export function getAgentStack(_request, response) {
-  response.json(getZeroGConfig());
+  response.json({ ...getZeroGConfig(), computeLayer: getComputeLayerConfig() });
 }
 
 export async function orchestrate(request, response, next) {
@@ -252,6 +283,15 @@ export async function generateCode(request, response, next) {
     let models;
     let strategy;
     let generationAccess = null;
+    // The compute layer (multi-agent DAG on the KULT Engine) takes the build
+    // when enabled for this tier, and an edit when it built the exact code
+    // being edited. Otherwise the in-process pipeline runs as before.
+    const requestedTier = isEdit
+      ? normalizeTier(input.tier ?? input.gamePackage?.generation?.qualityTier) ?? 1
+      : normalizeTier(input.tier);
+    const useCompute = isEdit
+      ? computeLayerEnabledFor(requestedTier) && computeCanEdit(existingGame, input.baseCode)
+      : Boolean(requestedTier) && computeLayerEnabledFor(requestedTier);
     if (isEdit) {
       const editTier = normalizeTier(input.tier ?? input.gamePackage?.generation?.qualityTier) ?? 1;
       models = getEditingModelsForTier(editTier);
@@ -328,27 +368,58 @@ export async function generateCode(request, response, next) {
           "generation.prompt": thumbnailGame.generation.prompt
         });
       }
-      if (!input.gamePackage.thumbnailJobId && !existingGame?.thumbnailUrl) {
-        const thumbnailJob = startJob("thumbnail-generation", () =>
-          generateAndStoreGameThumbnail(thumbnailGame)
-        );
-        input.gamePackage.thumbnailJobId = thumbnailJob.id;
-        input.gamePackage.title = title;
-        input.gamePackage.generation = thumbnailGame.generation;
-        await updateGamePackageFields(input.gamePackage.id, {
-          thumbnailJobId: thumbnailJob.id
-        });
-      }
+      input.gamePackage.title = title;
+      input.gamePackage.generation = thumbnailGame.generation;
+      // Compute-layer builds produce their own cover in the game's art style;
+      // the local thumbnail job only runs for legacy builds (or as a fallback).
+      if (!useCompute) await startThumbnailIfMissing(input.gamePackage, existingGame, thumbnailGame);
     }
     // 0G on-chain: an edit action (fresh builds are logged as GAME_GENERATED in gameController).
     if (isEdit) logActivityOnChain(ACTIVITY.GAME_EDITED, input.gamePackage?.id ?? "");
     const job = startJob("code-generation", async (updateProgress) => {
       let refinement;
+      let computeFields = null;
       try {
-        refinement = await createRefinementBundle(
-          { ...input, strategy, models },
-          { onProgress: updateProgress }
-        );
+        if (useCompute) {
+          try {
+            const computed = isEdit
+              ? await runComputeEdit({
+                  parentRunId: existingGame.generation.computeRunId,
+                  request: input.request,
+                  tier: requestedTier,
+                  refinementLevel: input.refinementLevel,
+                  onProgress: updateProgress
+                })
+              : await runComputeBuild({
+                  gameId: input.gamePackage?.id,
+                  prompt: input.request ?? input.gamePackage?.generation?.prompt ?? input.gamePackage?.customization?.prompt,
+                  tier: requestedTier,
+                  refinementLevel: input.refinementLevel,
+                  onProgress: updateProgress
+                });
+            refinement = computed.refinement;
+            computeFields = computed.fields;
+          } catch (computeError) {
+            if (!getComputeLayerConfig().fallback) throw computeError;
+            console.warn("[compute-layer] falling back to the in-process pipeline", {
+              gameId: input.gamePackage?.id ?? null,
+              message: computeError.message
+            });
+            if (!isEdit && input.gamePackage?.id) {
+              const latest = await getGamePackageById(input.gamePackage.id).catch(() => null);
+              await startThumbnailIfMissing(input.gamePackage, latest, { ...input.gamePackage, creatorId }).catch(() => null);
+            }
+            refinement = await createRefinementBundle(
+              { ...input, strategy, models },
+              { onProgress: updateProgress }
+            );
+          }
+        } else {
+          refinement = await createRefinementBundle(
+            { ...input, strategy, models },
+            { onProgress: updateProgress }
+          );
+        }
       } catch (error) {
         if (input.gamePackage?.id) {
           await updateGamePackageFields(input.gamePackage.id, {
@@ -376,14 +447,18 @@ export async function generateCode(request, response, next) {
                 refinement,
                 buildStatus: refinement?.generatedCode || strategy !== "pure-agent"
                   ? "ready"
-                  : "failed"
+                  : "failed",
+                ...(computeFields ?? {})
               });
             } else {
               // A confident local template match skips the initial prompt
               // routing request, so this code job may be the first backend
               // contact for the game. Persist it now so it can be published.
+              const nested = nestDottedFields(computeFields ?? {});
               await saveGamePackage({
                 ...input.gamePackage,
+                ...nested,
+                generation: { ...(input.gamePackage.generation ?? {}), ...(nested.generation ?? {}) },
                 creatorId,
                 tier: "ai-refinement",
                 refinement,

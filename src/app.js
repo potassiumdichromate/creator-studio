@@ -18,6 +18,7 @@ import { getDatabaseConfig } from "./services/databaseService.js";
 import { errorHandler } from "./middleware/errorHandler.js";
 import { getZeroGConfig } from "./services/zeroGService.js";
 import { getZeroGStorageConfig } from "./services/zeroGStorage.js";
+import { getComputeLayerConfig } from "./services/computeLayerService.js";
 import { requestIp, trackReferralClick } from "./services/referralService.js";
 
 dotenv.config();
@@ -85,6 +86,7 @@ const setupRoutes = (prefix) => {
       strategy: "template-first-ai-optional",
       database: getDatabaseConfig(),
       agents: getZeroGConfig(),
+      computeLayer: getComputeLayerConfig(),
       storage: getZeroGStorageConfig()
     });
   });
