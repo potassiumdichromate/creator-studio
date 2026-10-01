@@ -213,6 +213,23 @@ async function finishRun(run, { refinementLevel }) {
   const { game, quality } = await call("GET", `/v1/runs/${encodeURIComponent(run.id)}/package`);
   const { manifest, thumbnailUrl, warnings } = await importAssets(game);
   const refinement = toRefinement({ game, run, quality, refinementLevel, warnings });
+  // One line per finished build, so the logs show what the compute layer did.
+  const models = [...new Set(run.nodes.flatMap((n) => n.models ?? []))];
+  const summary = {
+    runId: run.id,
+    gameId: game.id,
+    seconds: Math.round((run.result?.durationMs ?? 0) / 1000),
+    sprites: Object.keys(manifest).length,
+    code: quality?.codeSource ?? null,
+    acceptance: quality?.acceptance?.ok ?? null,
+    playtest: quality?.playtest?.status ?? null,
+    degraded: run.nodes.filter((n) => n.status === "degraded" || n.status === "failed").map((n) => n.id),
+    models
+  };
+  console.info("[compute-layer] build complete", summary);
+  if (models.some((m) => String(m).startsWith("mock:"))) {
+    console.warn("[compute-layer] WARNING: the compute layer ran on its MOCK provider (template game, placeholder art). Set ZERO_G_API_KEY on the compute-layer service.");
+  }
   // Fields to merge onto the stored game record.
   const fields = {
     style: game.style,
