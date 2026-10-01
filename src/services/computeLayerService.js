@@ -212,6 +212,9 @@ function toRefinement({ game, run, quality, refinementLevel, warnings }) {
 async function finishRun(run, { refinementLevel }) {
   const { game, quality } = await call("GET", `/v1/runs/${encodeURIComponent(run.id)}/package`);
   const { manifest, thumbnailUrl, warnings } = await importAssets(game);
+  // Art that could not be copied keeps a compute-layer URL; if that URL is not
+  // publicly reachable the game shows plain shapes, so say so loudly.
+  if (warnings.length) console.warn("[compute-layer] asset import problems", { runId: run.id, warnings });
   const refinement = toRefinement({ game, run, quality, refinementLevel, warnings });
   // One line per finished build, so the logs show what the compute layer did.
   const models = [...new Set(run.nodes.flatMap((n) => n.models ?? []))];
