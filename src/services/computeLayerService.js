@@ -185,6 +185,19 @@ async function importAssets(game) {
   return { manifest, thumbnailUrl, warnings };
 }
 
+// Writes the game's own art (sprite manifest, catalog, style) into its code.
+// The build job returns only the code; a player that runs it with a game
+// package that lacks the manifest (e.g. right after generation, before the
+// stored record is reloaded) would otherwise draw plain shapes. The KULT Engine
+// reads KULT_EMBEDDED whenever the package it is given has no such art.
+export function embedArt(code, art) {
+  const source = String(code ?? "");
+  const json = JSON.stringify(art).replace(/</g, "\\u003c");
+  const line = `(typeof window !== "undefined" ? window : globalThis).KULT_EMBEDDED = ${json};\n`;
+  // Re-embedding (edits) replaces the previous line instead of stacking them.
+  return line + source.replace(/^\(typeof window !== "undefined" \? window : globalThis\)\.KULT_EMBEDDED = .*\n/, "");
+}
+
 // Shapes the compute result like createRefinementBundle's return value, so the
 // job result the frontend polls for is unchanged.
 function toRefinement({ game, run, quality, refinementLevel, warnings }) {
@@ -216,6 +229,11 @@ async function finishRun(run, { refinementLevel }) {
   // publicly reachable the game shows plain shapes, so say so loudly.
   if (warnings.length) console.warn("[compute-layer] asset import problems", { runId: run.id, warnings });
   const refinement = toRefinement({ game, run, quality, refinementLevel, warnings });
+  refinement.generatedCode = embedArt(refinement.generatedCode, {
+    title: game.title,
+    style: game.style,
+    gameplayAssets: { manifest, catalog: game.gameplayAssets?.catalog ?? [] }
+  });
   // One line per finished build, so the logs show what the compute layer did.
   const models = [...new Set(run.nodes.flatMap((n) => n.models ?? []))];
   const summary = {

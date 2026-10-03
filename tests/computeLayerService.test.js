@@ -7,6 +7,7 @@ process.env.COMPUTE_LAYER_POLL_MS = "10";
 const {
   codeHash,
   computeCanEdit,
+  embedArt,
   computeLayerEnabledFor,
   runComputeBuild,
   runComputeEdit,
@@ -102,7 +103,10 @@ test("runComputeBuild waits for the run, imports assets, and returns a legacy-sh
     assert.equal(create.key, "secret");
 
     assert.equal(out.runId, "run_1");
-    assert.equal(out.refinement.generatedCode, GAME_CODE);
+    // The code carries its own art so it renders even without the package manifest.
+    assert.ok(out.refinement.generatedCode.endsWith(GAME_CODE));
+    assert.ok(out.refinement.generatedCode.startsWith("(typeof window"));
+    assert.ok(out.refinement.generatedCode.includes('"player":"https://r2.test/sprites/abc123xyz/player.png"'));
     assert.equal(out.refinement.costProfile, "0g-compute-layer");
     assert.equal(out.refinement.model, "coder-x");
     assert.deepEqual(out.refinement.validation, ["Headless acceptance test passed"]);
@@ -114,7 +118,7 @@ test("runComputeBuild waits for the run, imports assets, and returns a legacy-sh
     assert.equal(storage.uploads.length, 3);
 
     assert.equal(out.fields["generation.computeRunId"], "run_1");
-    assert.equal(out.fields["generation.computeCodeHash"], codeHash(GAME_CODE));
+    assert.equal(out.fields["generation.computeCodeHash"], codeHash(out.refinement.generatedCode));
     assert.equal(out.fields["generation.recipe"], "runner");
     assert.ok(progress.length >= 2 && progress.at(-1).completed === 2, "progress is reported from node states");
   } finally {
@@ -138,11 +142,18 @@ test("edits go to the parent run only when it built the exact code being edited"
     const create = fake.calls.find((c) => c.method === "POST");
     assert.equal(create.url, "/v1/runs/run_9/edits");
     assert.equal(create.body.request, "make it faster");
-    assert.equal(out.refinement.generatedCode, GAME_CODE);
+    assert.ok(out.refinement.generatedCode.endsWith(GAME_CODE));
   } finally {
     setComputeLayerStorageForTests(null);
     fake.server.close();
   }
+});
+
+test("embedArt replaces a previous embed instead of stacking", () => {
+  const once = embedArt(GAME_CODE, { gameplayAssets: { manifest: { a: "1" } } });
+  const twice = embedArt(once, { gameplayAssets: { manifest: { a: "2" } } });
+  assert.equal(twice.match(/KULT_EMBEDDED/g).length, 1);
+  assert.ok(twice.includes('"a":"2"') && twice.endsWith(GAME_CODE));
 });
 
 test("a failed compute run rejects so callers can fall back", async () => {
