@@ -7,6 +7,7 @@ import { recordGenerationProvenance, recordPublishedSnapshot } from "../services
 import { logActivityOnChain, ACTIVITY } from "../services/zeroGActivityLog.js";
 import { awardFirstGameBonus, recordCreatorGamePublished } from "../services/pointsService.js";
 import { notifyFollowersOfPublish } from "../services/socialService.js";
+import { buildCreatorDashboard } from "./dashboardController.js";
 
 // Internal API for Kult Create (the game-studio building in Kult World).
 // Kult Create runs the build on the compute layer itself and bills its own
@@ -20,7 +21,7 @@ const importSchema = z.object({
   studio: z.object({
     agencyId: z.string().max(60),
     name: z.string().max(60),
-    okxAgentId: z.string().max(40),
+    okxAgentId: z.string().max(40).optional().default(""), // studios may skip OKX.ai
     ceoTokenId: z.string().max(40).optional(),
     ceoName: z.string().max(80).optional()
   }),
@@ -92,6 +93,23 @@ export async function importKultCreateGame(request, response, next) {
       playUrl: publish.playPath && process.env.CREATOR_STUDIO_PUBLIC_URL ? `${process.env.CREATOR_STUDIO_PUBLIC_URL.replace(/\/$/, "")}${publish.playPath}` : publish.playPath ?? null,
       thumbnailUrl: game.thumbnailUrl ?? null, warnings: computed.warnings, ...extras
     });
+  } catch (error) {
+    next(error);
+  }
+}
+
+const dashboardSchema = z.object({
+  agencyId: z.string().min(4).max(60),
+  wallets: z.string().transform((s) => s.split(",").map((w) => w.trim().toLowerCase()).filter((w) => /^0x[a-f0-9]{40}$/.test(w))).pipe(z.array(z.string()).min(1).max(10)),
+  range: z.enum(["day", "week", "month", "year"]).default("week")
+});
+
+// The CEO dashboard's engagement numbers: the same payload as the creator
+// dashboard, limited to the games one Kult Create studio published.
+export async function kultCreateDashboard(request, response, next) {
+  try {
+    const { agencyId, wallets, range } = dashboardSchema.parse(request.query);
+    response.json(await buildCreatorDashboard(wallets, range, { "studio.agencyId": agencyId }));
   } catch (error) {
     next(error);
   }
