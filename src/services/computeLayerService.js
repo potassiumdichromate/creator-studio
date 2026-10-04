@@ -307,3 +307,14 @@ export function computeCanEdit(storedGame, baseCode) {
   const hash = storedGame?.generation?.computeCodeHash;
   return Boolean(runId && hash && baseCode && codeHash(baseCode) === hash);
 }
+
+/**
+ * Imports an already finished compute-layer run (built by another service,
+ * e.g. Kult Create) into this backend: art copied to storage, art embedded in
+ * the code. Returns { refinement, fields, game, warnings, runId }.
+ */
+export async function importComputeRun(runId) {
+  const run = await call("GET", `/v1/runs/${encodeURIComponent(runId)}`);
+  if (run.status !== "complete") throw Object.assign(new Error(`Compute run ${runId} is ${run.status}`), { status: 409 });
+  return { ...(await finishRun(run, { refinementLevel: "medium" })), runId: run.id };
+}

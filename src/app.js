@@ -14,6 +14,7 @@ import { thumbnailRouter } from "./routes/thumbnailRoutes.js";
 import { referralAdminRouter, referralRouter } from "./routes/referralRoutes.js";
 import { starRouter, telegramRouter } from "./routes/starRoutes.js";
 import { creatorSubscriptionRouter } from "./routes/creatorSubscriptionRoutes.js";
+import { kultCreateRouter } from "./routes/kultCreateRoutes.js";
 import { getDatabaseConfig } from "./services/databaseService.js";
 import { errorHandler } from "./middleware/errorHandler.js";
 import { getZeroGConfig } from "./services/zeroGService.js";
@@ -104,6 +105,7 @@ const setupRoutes = (prefix) => {
   app.use(`${prefix}/thumbnails`, thumbnailRouter);
   app.use(`${prefix}/referral`, referralRouter);
   app.use(`${prefix}/admin/referral`, referralAdminRouter);
+  app.use(`${prefix}/internal/kult-create`, kultCreateRouter);
 };
 
 setupRoutes("/api");
