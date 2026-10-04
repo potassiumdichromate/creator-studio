@@ -1,12 +1,12 @@
 import { timingSafeEqual } from "node:crypto";
 import { z } from "zod";
-import { getGamePackageById, saveGamePackage } from "../services/databaseService.js";
+import { getGameCollection, getGamePackageById, saveGamePackage } from "../services/databaseService.js";
 import { importComputeRun } from "../services/computeLayerService.js";
 import { logActivity } from "../services/activityService.js";
 import { recordGenerationProvenance, recordPublishedSnapshot } from "../services/zeroGProvenanceService.js";
 import { logActivityOnChain, ACTIVITY } from "../services/zeroGActivityLog.js";
 import { awardFirstGameBonus, recordCreatorGamePublished } from "../services/pointsService.js";
-import { notifyFollowersOfPublish } from "../services/socialService.js";
+import { getCommentCountsForGames, getEngagementCountsForGames, notifyFollowersOfPublish } from "../services/socialService.js";
 import { buildCreatorDashboard } from "./dashboardController.js";
 
 // Internal API for Kult Create (the game-studio building in Kult World).
@@ -110,6 +110,45 @@ export async function kultCreateDashboard(request, response, next) {
   try {
     const { agencyId, wallets, range } = dashboardSchema.parse(request.query);
     response.json(await buildCreatorDashboard(wallets, range, { "studio.agencyId": agencyId }));
+  } catch (error) {
+    next(error);
+  }
+}
+
+// The most-played published games made in Kult Create, across every studio,
+// for the "Top games" board inside the Kult Create office.
+export async function kultCreateTopGames(request, response, next) {
+  try {
+    const limit = Math.min(Math.max(Number(request.query.limit) || 20, 1), 50);
+    const games = await getGameCollection();
+    const rows = await games
+      .find(
+        { "studio.source": "kult-create", "publish.published": true },
+        { projection: { _id: 0, id: 1, title: 1, thumbnailUrl: 1, views: 1, studio: 1, "generation.computeRunId": 1, "publish.publishedAt": 1, "publish.playPath": 1 } }
+      )
+      .sort({ views: -1, "publish.publishedAt": -1 })
+      .limit(limit)
+      .toArray();
+    const ids = rows.map((g) => g.id);
+    const [engagement, comments] = await Promise.all([getEngagementCountsForGames(ids), getCommentCountsForGames(ids)]);
+    const base = process.env.CREATOR_STUDIO_PUBLIC_URL?.replace(/\/$/, "") || null;
+    response.json({
+      games: rows.map((g) => {
+        const e = engagement.byGame[g.id] ?? { likes: 0, shares: 0, remixes: 0 };
+        return {
+          id: g.id,
+          title: g.title || "Untitled game",
+          thumbnailUrl: g.thumbnailUrl ?? null,
+          plays: Number(g.views ?? 0),
+          likes: e.likes, shares: e.shares, remixes: e.remixes,
+          comments: comments[g.id] ?? 0,
+          studio: { agencyId: g.studio?.agencyId ?? null, name: g.studio?.name ?? null, ceoName: g.studio?.ceoName ?? null },
+          computeRunId: g.generation?.computeRunId ?? null,
+          playUrl: base && g.publish?.playPath ? `${base}${g.publish.playPath}` : null,
+          publishedAt: g.publish?.publishedAt ?? null
+        };
+      })
+    });
   } catch (error) {
     next(error);
   }
